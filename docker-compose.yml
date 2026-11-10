@@ -1,0 +1,49 @@
+services:
+  db:
+    # Pinned: ships both pg_search and pgvector (verified). PG17.
+    image: paradedb/paradedb:0.26.6-pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: search
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-owner_dev}
+      APP_PASSWORD: ${APP_PASSWORD:-app_dev}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d search"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    # Runs as the owner role, never as the app role.
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=postgres://search_owner:${OWNER_PASSWORD:-owner_dev}@db:5432/search?sslmode=disable
+      - up
+    restart: "no"
+
+  api:
+    build: .
+    # Connects as the restricted app role, never the owner or superuser.
+    environment:
+      DATABASE_URL: postgres://search_app:${APP_PASSWORD:-app_dev}@db:5432/search?sslmode=disable
+      HTTP_PORT: "8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+
+volumes:
+  pgdata:

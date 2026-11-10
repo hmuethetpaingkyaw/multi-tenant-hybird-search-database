@@ -1,0 +1,46 @@
+package config
+
+import (
+	"testing"
+	"time"
+)
+
+func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+
+func TestDefaults(t *testing.T) {
+	c, err := load(env(map[string]string{"DATABASE_URL": "postgres://x"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.HTTPPort != "8080" || c.LogLevel != "info" || c.DBMaxConns != 10 || c.DBMinConns != 1 ||
+		c.DBMaxConnLifetime != 30*time.Minute || c.DBHealthCheck != time.Minute {
+		t.Fatalf("unexpected defaults: %+v", c)
+	}
+}
+
+func TestOverrides(t *testing.T) {
+	c, err := load(env(map[string]string{
+		"DATABASE_URL": "postgres://x", "HTTP_PORT": "9000", "DB_MAX_CONNS": "20",
+		"DB_MAX_CONN_LIFETIME": "5m",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.HTTPPort != "9000" || c.DBMaxConns != 20 || c.DBMaxConnLifetime != 5*time.Minute {
+		t.Fatalf("overrides not applied: %+v", c)
+	}
+}
+
+func TestInvalid(t *testing.T) {
+	cases := map[string]map[string]string{
+		"missing url":  {},
+		"bad int":      {"DATABASE_URL": "x", "DB_MAX_CONNS": "abc"},
+		"min over max": {"DATABASE_URL": "x", "DB_MAX_CONNS": "2", "DB_MIN_CONNS": "5"},
+		"bad duration": {"DATABASE_URL": "x", "DB_MAX_CONN_LIFETIME": "soon"},
+	}
+	for name, m := range cases {
+		if _, err := load(env(m)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
