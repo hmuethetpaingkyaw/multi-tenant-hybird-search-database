@@ -11,8 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	appt "multi-tenant-hybrid-search/internal/application/tenant"
+	"multi-tenant-hybrid-search/internal/auth"
 	"multi-tenant-hybrid-search/internal/config"
 	httpapi "multi-tenant-hybrid-search/internal/delivery/http"
+	"multi-tenant-hybrid-search/internal/delivery/middleware"
 	"multi-tenant-hybrid-search/internal/infrastructure/database"
 )
 
@@ -54,9 +57,19 @@ func run() error {
 		}
 		return database.CheckExtensions(ctx, pool)
 	}
+	authn, err := auth.New(cfg.JWTSecret)
+	if err != nil {
+		return err
+	}
+	handler := httpapi.NewRouter(httpapi.Deps{
+		Ready: ready,
+		Log:   log,
+		Auth:  middleware.Auth(authn),
+		Me:    appt.NewService(database.NewTenantRepository(pool)),
+	})
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           httpapi.NewRouter(ready, log),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

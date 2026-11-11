@@ -14,6 +14,8 @@ type Config struct {
 	DatabaseURL string
 	HTTPPort    string
 	LogLevel    string
+	// JWTSecret signs and verifies dev auth tokens (HS256); at least 32 bytes.
+	JWTSecret string
 
 	DBMaxConns        int32
 	DBMinConns        int32
@@ -29,9 +31,13 @@ func load(get func(string) string) (Config, error) {
 		DatabaseURL: get("DATABASE_URL"),
 		HTTPPort:    str(get, "HTTP_PORT", "8080"),
 		LogLevel:    str(get, "LOG_LEVEL", "info"),
+		JWTSecret:   get("JWT_SECRET"),
 	}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("config: DATABASE_URL is required")
+	}
+	if len(c.JWTSecret) < 32 {
+		return Config{}, errors.New("config: JWT_SECRET is required and must be at least 32 bytes")
 	}
 	var err error
 	if c.DBMaxConns, err = int32v(get, "DB_MAX_CONNS", 10); err != nil {

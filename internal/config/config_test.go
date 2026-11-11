@@ -5,10 +5,12 @@ import (
 	"time"
 )
 
+const secret = "0123456789abcdef0123456789abcdef"
+
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
 func TestDefaults(t *testing.T) {
-	c, err := load(env(map[string]string{"DATABASE_URL": "postgres://x"}))
+	c, err := load(env(map[string]string{"DATABASE_URL": "postgres://x", "JWT_SECRET": secret}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +22,7 @@ func TestDefaults(t *testing.T) {
 
 func TestOverrides(t *testing.T) {
 	c, err := load(env(map[string]string{
-		"DATABASE_URL": "postgres://x", "HTTP_PORT": "9000", "DB_MAX_CONNS": "20",
+		"DATABASE_URL": "postgres://x", "JWT_SECRET": secret, "HTTP_PORT": "9000", "DB_MAX_CONNS": "20",
 		"DB_MAX_CONN_LIFETIME": "5m",
 	}))
 	if err != nil {
@@ -33,10 +35,12 @@ func TestOverrides(t *testing.T) {
 
 func TestInvalid(t *testing.T) {
 	cases := map[string]map[string]string{
-		"missing url":  {},
-		"bad int":      {"DATABASE_URL": "x", "DB_MAX_CONNS": "abc"},
-		"min over max": {"DATABASE_URL": "x", "DB_MAX_CONNS": "2", "DB_MIN_CONNS": "5"},
-		"bad duration": {"DATABASE_URL": "x", "DB_MAX_CONN_LIFETIME": "soon"},
+		"missing url":    {"JWT_SECRET": secret},
+		"missing secret": {"DATABASE_URL": "x"},
+		"short secret":   {"DATABASE_URL": "x", "JWT_SECRET": "short"},
+		"bad int":        {"DATABASE_URL": "x", "JWT_SECRET": secret, "DB_MAX_CONNS": "abc"},
+		"min over max":   {"DATABASE_URL": "x", "JWT_SECRET": secret, "DB_MAX_CONNS": "2", "DB_MIN_CONNS": "5"},
+		"bad duration":   {"DATABASE_URL": "x", "JWT_SECRET": secret, "DB_MAX_CONN_LIFETIME": "soon"},
 	}
 	for name, m := range cases {
 		if _, err := load(env(m)); err == nil {

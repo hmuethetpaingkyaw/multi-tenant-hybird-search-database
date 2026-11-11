@@ -39,6 +39,7 @@ services:
     environment:
       DATABASE_URL: postgres://search_app:${APP_PASSWORD:-app_dev}@db:5432/search?sslmode=disable
       HTTP_PORT: "8080"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
     depends_on:
       migrate:
         condition: service_completed_successfully

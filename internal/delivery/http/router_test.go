@@ -13,7 +13,7 @@ import (
 
 func get(t *testing.T, ready ReadyFunc, path string) *httptest.ResponseRecorder {
 	t.Helper()
-	r := NewRouter(ready, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r := NewRouter(Deps{Ready: ready, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
 	return w
