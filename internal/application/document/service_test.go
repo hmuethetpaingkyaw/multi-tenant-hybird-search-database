@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	domain "multi-tenant-hybrid-search/internal/domain/document"
+	"multi-tenant-hybrid-search/internal/domain/embedding"
 	"multi-tenant-hybrid-search/internal/domain/tenant"
+	emb "multi-tenant-hybrid-search/internal/infrastructure/embedding"
 )
 
 type fakeRepo struct {
@@ -17,7 +19,7 @@ type fakeRepo struct {
 }
 
 func (f *fakeRepo) rec(scope string) { f.calls++; f.scope = scope }
-func (f *fakeRepo) Create(_ context.Context, s string, in domain.Input) (domain.Document, error) {
+func (f *fakeRepo) Create(_ context.Context, s string, in domain.Input, _ embedding.Embedding) (domain.Document, error) {
 	f.rec(s)
 	return domain.Document{Title: in.Title}, f.err
 }
@@ -30,7 +32,7 @@ func (f *fakeRepo) List(_ context.Context, s string, l, o int) ([]domain.Summary
 	f.limit, f.off = l, o
 	return []domain.Summary{}, f.err
 }
-func (f *fakeRepo) Update(_ context.Context, s, _ string, in domain.Input) (domain.Document, error) {
+func (f *fakeRepo) Update(_ context.Context, s, _ string, in domain.Input, _ embedding.Embedding) (domain.Document, error) {
 	f.rec(s)
 	return domain.Document{Title: in.Title}, f.err
 }
@@ -40,7 +42,7 @@ var ident = tenant.Identity{UserID: "u", TenantID: "11111111-1111-1111-1111-1111
 
 func TestInvalidInputNeverReachesRepository(t *testing.T) {
 	r := &fakeRepo{}
-	s := NewService(r)
+	s := NewService(r, &emb.Fake{})
 	if _, err := s.Create(context.Background(), ident, domain.Input{Title: " ", Content: "c"}); !errors.Is(err, domain.ErrInvalid) {
 		t.Errorf("create: %v", err)
 	}
@@ -54,7 +56,7 @@ func TestInvalidInputNeverReachesRepository(t *testing.T) {
 
 func TestIdentityTenantIsTheScope(t *testing.T) {
 	r := &fakeRepo{}
-	s := NewService(r)
+	s := NewService(r, &emb.Fake{})
 	ctx := context.Background()
 	_, _ = s.Create(ctx, ident, domain.Input{Title: "t", Content: "c"})
 	_, _ = s.Get(ctx, ident, "x")
@@ -84,7 +86,7 @@ func TestPagination(t *testing.T) {
 	}
 	for _, c := range cases {
 		r := &fakeRepo{}
-		res, err := NewService(r).List(context.Background(), ident, c.limit, c.off)
+		res, err := NewService(r, &emb.Fake{}).List(context.Background(), ident, c.limit, c.off)
 		if c.wantErr != "" {
 			if !errors.Is(err, domain.ErrInvalid) || err.Error() != c.wantErr || r.calls != 0 {
 				t.Errorf("%s: err=%v calls=%d", c.name, err, r.calls)

@@ -16,6 +16,7 @@ import (
 	appdoc "multi-tenant-hybrid-search/internal/application/document"
 	"multi-tenant-hybrid-search/internal/delivery/middleware"
 	domain "multi-tenant-hybrid-search/internal/domain/document"
+	"multi-tenant-hybrid-search/internal/domain/embedding"
 	"multi-tenant-hybrid-search/internal/domain/tenant"
 )
 
@@ -191,14 +192,23 @@ func (h *documentHandlers) identityAndBody(c *gin.Context) (tenant.Identity, dom
 	if !ok {
 		return id, domain.Input{}, false
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
-	dec := json.NewDecoder(c.Request.Body)
-	dec.DisallowUnknownFields()
 	var req struct {
 		Title   string `json:"title"`
 		Content string `json:"content"`
 	}
-	err := dec.Decode(&req)
+	if !decodeJSON(c, &req, maxBodyBytes) {
+		return id, domain.Input{}, false
+	}
+	return id, domain.Input{Title: req.Title, Content: req.Content}, true
+}
+
+// decodeJSON strictly decodes exactly one JSON object into dst (unknown fields rejected, size capped).
+// On failure it writes the error response (400 or 413) and returns false.
+func decodeJSON(c *gin.Context, dst any, maxBytes int64) bool {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	err := dec.Decode(dst)
 	if err == nil {
 		// Exactly one JSON value: reject trailing data.
 		if err2 := dec.Decode(&struct{}{}); err2 != io.EOF {
@@ -208,20 +218,20 @@ func (h *documentHandlers) identityAndBody(c *gin.Context) (tenant.Identity, dom
 			}
 		}
 	}
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		switch {
-		case errors.As(err, &tooBig):
-			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
-		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			c.AbortWithStatusJSON(http.StatusBadRequest,
-				gin.H{"error": "invalid request body: " + strings.TrimPrefix(err.Error(), "json: ")})
-		default:
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		}
-		return id, domain.Input{}, false
+	if err == nil {
+		return true
 	}
-	return id, domain.Input{Title: req.Title, Content: req.Content}, true
+	var tooBig *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooBig):
+		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+	case strings.HasPrefix(err.Error(), "json: unknown field "):
+		c.AbortWithStatusJSON(http.StatusBadRequest,
+			gin.H{"error": "invalid request body: " + strings.TrimPrefix(err.Error(), "json: ")})
+	default:
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+	}
+	return false
 }
 
 // fail maps errors to responses. Internal errors are logged, never returned to the client.
@@ -231,6 +241,9 @@ func (h *documentHandlers) fail(c *gin.Context, err error) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrNotFound):
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
+	case errors.Is(err, embedding.ErrUnavailable):
+		h.deps.Log.Error("embedding failed", "method", c.Request.Method, "path", c.FullPath(), "error", err)
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "embedding service unavailable"})
 	default:
 		h.deps.Log.Error("document request failed", "method", c.Request.Method, "path", c.FullPath(), "error", err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal error"})

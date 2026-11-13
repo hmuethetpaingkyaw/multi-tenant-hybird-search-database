@@ -17,6 +17,7 @@ import (
 	"multi-tenant-hybrid-search/internal/delivery/middleware"
 	"multi-tenant-hybrid-search/internal/domain/tenant"
 	"multi-tenant-hybrid-search/internal/infrastructure/database"
+	"multi-tenant-hybrid-search/internal/infrastructure/embedding"
 )
 
 func TestDocumentsHTTPFullStackIsolation(t *testing.T) {
@@ -32,7 +33,7 @@ func TestDocumentsHTTPFullStackIsolation(t *testing.T) {
 		Ready:     func(context.Context) error { return nil },
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Auth:      middleware.Auth(authn),
-		Documents: appdoc.NewService(database.NewDocumentRepository(e.app)),
+		Documents: appdoc.NewService(database.NewDocumentRepository(e.app), &embedding.Fake{}),
 	})
 	token := func(tenantID string) string {
 		tok, err := authn.Issue(tenant.Identity{UserID: "10000000-0000-0000-0000-000000000001", TenantID: tenantID}, time.Hour)

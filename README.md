@@ -1,7 +1,7 @@
 # Multi-tenant hybrid search database
 
 Go + PostgreSQL service for tenant-isolated document search (RLS, pgvector, BM25).
-**Status: Phase 3 (document management).** Embeddings and search arrive in later phases; see [docs/project-plan.md](docs/project-plan.md).
+**Status: Phase 4 (embeddings and semantic search).** Keyword (BM25) and hybrid search arrive in Phase 5; see [docs/project-plan.md](docs/project-plan.md).
 
 ## Run
 
@@ -9,7 +9,7 @@ Requires Docker (Compose v2). Optional: Go 1.26 (the toolchain downloads automat
 
 ```sh
 cp .env.example .env     # development defaults; DB_PORT defaults to 5433 to avoid clashes
-make up                  # db -> migrations -> API
+make up                  # db -> migrations -> Ollama (pulls the embedding model) -> API
 make seed                # tenants A/B/C + one user each; prints TOKEN_A/B/C (valid 24h)
 curl localhost:8080/healthz
 curl localhost:8080/readyz
@@ -22,12 +22,16 @@ make down
 is idempotent, and prints fresh tokens each time. Copy a `TOKEN_x=...` line into your shell
 (`export TOKEN_A=...`).
 
+The first `make up` downloads the Ollama image (about 3 GB) and the embedding model into the `ollama_data` volume;
+later runs reuse them. Ollama runs CPU-only inside Docker on macOS, which is fine for an embedding model.
+
 ## Pinned versions
 
 | Component | Version | Note |
 |---|---|---|
 | ParadeDB image | `paradedb/paradedb:0.26.6-pg17` | PostgreSQL 17, pg_search 0.26.6, pgvector 0.8.6 (both verified present) |
 | golang-migrate image | `migrate/migrate:v4.18.3` | |
+| Ollama image | `ollama/ollama:0.40.16` | serves `nomic-embed-text` (768 dimensions, fixed by the schema) |
 
 The image tag is duplicated in `docker-compose.yml` and `tests/helpers_test.go`; change both together.
 
@@ -71,6 +75,31 @@ session-level `SET` for the tenant.
    (nomic-embed-text, Phase 4).
 3. `app_grants`: table privileges for `search_app`.
 4. `rls`: tenant helper function, RLS enabled/forced, per-command policies, `tenants` made read-only for the app.
+5. `embedding_index`: HNSW cosine index on `document_embeddings.embedding`.
+
+## Embeddings and semantic search (Phase 4)
+
+- Creating or updating a document **synchronously** embeds it (Ollama, `nomic-embed-text`) before writing, then writes the
+  document and its embedding in **one transaction**. The embedding call happens *outside* the transaction so a slow model
+  never holds a database connection.
+- If the embedding service fails (down, timeout of `EMBEDDING_TIMEOUT` default 30s, model not pulled, wrong dimension),
+  the request returns `503 {"error":"embedding service unavailable"}`, nothing is written (updates leave the document and
+  its embedding unchanged), and the cause is logged at ERROR. Reads and deletes keep working; `/readyz` is database-only.
+- Measured against `ollama/ollama:0.40.16` + `nomic-embed-text`: `POST /api/embed` with `{"model","input":[...]}` returns
+  `{"embeddings":[[...768 floats...]], ...}`; a missing model is HTTP 404; input beyond the context window is **silently
+  truncated by Ollama to 2048 tokens** (observed `prompt_eval_count: 2048` for a 30k-character input), so dense text
+  (code, non-English) can lose its tail before our own 8000-character cut.
+- One chunk per document: the text is `title + "\n\n" + content`, cut to the first **8000 characters**. Text beyond that is
+  saved but does not influence semantic search. Real chunking and background embedding are planned for a later phase.
+- Documents created before Phase 4 have no embedding and are not returned by semantic search until they are re-saved with `PUT`.
+- `POST /api/v1/search/semantic` embeds the query and returns the nearest documents by cosine similarity, under RLS.
+  There is no similarity cutoff, so an unrelated query still returns the closest documents with low scores.
+- Index: one global HNSW index (`vector_cosine_ops`); searches also set `hnsw.iterative_scan` per transaction.
+  **Known limitation:** with a single global ANN index and RLS filtering after the scan, a very small tenant surrounded by a
+  much larger tenant's nearer vectors can get short or empty results if the planner is forced onto the HNSW graph (reproduced
+  in development; iterative scan does not fix that extreme case). For selective tenant filters the planner normally chooses
+  the `tenant_id` index and an exact sort, which is correct, and the test suite covers that. Per-tenant partitioning or an
+  exact-search fallback are the options if this matters at scale (Phase 6 performance analysis).
 
 ## Endpoints
 
@@ -104,11 +133,24 @@ curl -s localhost:8080/api/v1/documents -H "Authorization: Bearer $TOKEN_A"
 curl -s localhost:8080/api/v1/documents/<id> -H "Authorization: Bearer $TOKEN_B"   # 404: not tenant B's document
 ```
 
+### Semantic search (`POST /api/v1/search/semantic`, bearer token required)
+
+Body `{"query": "...", "limit": 10}` (`limit` optional: default 10, above 100 clamped to 100, below 1 is a 400). `query` is
+required, trimmed, at most 2000 characters; unknown fields such as `tenant_id` are a 400; bodies over 16 KiB are a 413.
+Response `200 {"results":[{"document_id","title","score"}],"total":N}`, most similar first (`score` is cosine similarity),
+`{"results":[],"total":0}` when nothing is embedded. `503 embedding service unavailable` if Ollama fails.
+
+```sh
+curl -s -X POST localhost:8080/api/v1/search/semantic -H "Authorization: Bearer $TOKEN_A" \
+  -H 'Content-Type: application/json' -d '{"query":"How can I recover my account?","limit":5}'
+```
+
 ## Configuration (environment)
 
 `DATABASE_URL` (required, app role), `JWT_SECRET` (required, at least 32 bytes), `HTTP_PORT` (8080),
 `LOG_LEVEL` (info), `DB_MAX_CONNS` (10), `DB_MIN_CONNS` (1), `DB_MAX_CONN_LIFETIME` (30m),
-`DB_HEALTH_CHECK_PERIOD` (1m). `cmd/seed` additionally needs `SEED_DATABASE_URL` (owner role; set by `make seed`).
+`DB_HEALTH_CHECK_PERIOD` (1m), `OLLAMA_URL` (`http://localhost:11434`; Compose sets `http://ollama:11434`),
+`EMBEDDING_MODEL` (`nomic-embed-text`), `EMBEDDING_TIMEOUT` (30s). `cmd/seed` additionally needs `SEED_DATABASE_URL` (owner role; set by `make seed`).
 
 ## Security tests
 

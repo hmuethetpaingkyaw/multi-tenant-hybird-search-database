@@ -12,12 +12,14 @@ import (
 	"time"
 
 	appdoc "multi-tenant-hybrid-search/internal/application/document"
+	appsearch "multi-tenant-hybrid-search/internal/application/search"
 	appt "multi-tenant-hybrid-search/internal/application/tenant"
 	"multi-tenant-hybrid-search/internal/auth"
 	"multi-tenant-hybrid-search/internal/config"
 	httpapi "multi-tenant-hybrid-search/internal/delivery/http"
 	"multi-tenant-hybrid-search/internal/delivery/middleware"
 	"multi-tenant-hybrid-search/internal/infrastructure/database"
+	"multi-tenant-hybrid-search/internal/infrastructure/embedding"
 )
 
 func main() {
@@ -62,12 +64,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	embedder := embedding.NewOllama(cfg.OllamaURL, cfg.EmbeddingModel, cfg.EmbeddingTimeout)
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Ready:     ready,
 		Log:       log,
 		Auth:      middleware.Auth(authn),
 		Me:        appt.NewService(database.NewTenantRepository(pool)),
-		Documents: appdoc.NewService(database.NewDocumentRepository(pool)),
+		Documents: appdoc.NewService(database.NewDocumentRepository(pool), embedder),
+		Search:    appsearch.NewService(database.NewSearchRepository(pool), embedder),
 	})
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,

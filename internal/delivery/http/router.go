@@ -30,6 +30,7 @@ type Deps struct {
 	Auth      gin.HandlerFunc
 	Me        MeService
 	Documents DocumentService
+	Search    SearchService
 }
 
 func NewRouter(d Deps) *gin.Engine {
@@ -59,6 +60,9 @@ func NewRouter(d Deps) *gin.Engine {
 		}
 		if d.Documents != nil {
 			registerDocuments(api, d)
+		}
+		if d.Search != nil {
+			registerSearch(api, d)
 		}
 	}
 	return r
