@@ -26,9 +26,10 @@ type MeService interface {
 type Deps struct {
 	Ready ReadyFunc
 	Log   *slog.Logger
-	// Auth guards /api/v1. When nil (or Me is nil), the API group is not registered.
-	Auth gin.HandlerFunc
-	Me   MeService
+	// Auth guards /api/v1. When nil, no API routes are registered; Me and Documents register their routes when non-nil.
+	Auth      gin.HandlerFunc
+	Me        MeService
+	Documents DocumentService
 }
 
 func NewRouter(d Deps) *gin.Engine {
@@ -51,9 +52,14 @@ func NewRouter(d Deps) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
 
-	if d.Auth != nil && d.Me != nil {
+	if d.Auth != nil {
 		api := r.Group("/api/v1", d.Auth)
-		api.GET("/me", meHandler(d))
+		if d.Me != nil {
+			api.GET("/me", meHandler(d))
+		}
+		if d.Documents != nil {
+			registerDocuments(api, d)
+		}
 	}
 	return r
 }

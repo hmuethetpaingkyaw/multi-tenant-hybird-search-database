@@ -1,8 +1,7 @@
 # Multi-tenant hybrid search database
 
 Go + PostgreSQL service for tenant-isolated document search (RLS, pgvector, BM25).
-**Status: Phase 2 (multi-tenant architecture and RLS).** Document CRUD and search arrive in later
-phases; see [docs/project-plan.md](docs/project-plan.md).
+**Status: Phase 3 (document management).** Embeddings and search arrive in later phases; see [docs/project-plan.md](docs/project-plan.md).
 
 ## Run
 
@@ -79,6 +78,31 @@ session-level `SET` for the tenant.
 - `GET /readyz`: database reachable and `vector` + `pg_search` installed; 503 otherwise (no auth).
 - `GET /api/v1/me`: the caller's tenant and user. 401 for a missing/invalid token, 404 if the user or tenant is not
   visible under RLS.
+
+### Documents (`/api/v1/documents`, bearer token required)
+
+| Method | Path | Success | Notes |
+|---|---|---|---|
+| POST | `/documents` | 201 + document | body `{"title","content"}` |
+| GET | `/documents` | 200 `{documents, limit, offset}` | newest first; items omit `content`; `?limit=` (1-100, default 20, larger values are clamped) and `?offset=` (default 0) |
+| GET | `/documents/:id` | 200 + document | |
+| PUT | `/documents/:id` | 200 + document | full replace of title and content |
+| DELETE | `/documents/:id` | 204 | also removes the document's embeddings |
+
+Rules: `title` is required, trimmed, at most 500 characters; `content` is required, at most 1 MiB; the body must be JSON
+containing only `title` and `content` (anything else, e.g. `tenant_id`, is a 400; the tenant always comes from the token).
+The request body is capped at about 1 MiB plus 64 KiB of overhead; note that JSON escaping of the content counts toward it.
+
+Errors are `{"error": "<message>"}`: `401 unauthorized` (bad/missing token), `400` (invalid body, id or paging),
+`404 not found` (missing **or another tenant's** document; the two are indistinguishable), `413 request body too large`,
+`500 internal error` (details are in the server log, not the response). Concurrent edits are last-write-wins.
+
+```sh
+curl -s -X POST localhost:8080/api/v1/documents -H "Authorization: Bearer $TOKEN_A" \
+  -H 'Content-Type: application/json' -d '{"title":"Account Recovery Guide","content":"How to recover your account"}'
+curl -s localhost:8080/api/v1/documents -H "Authorization: Bearer $TOKEN_A"
+curl -s localhost:8080/api/v1/documents/<id> -H "Authorization: Bearer $TOKEN_B"   # 404: not tenant B's document
+```
 
 ## Configuration (environment)
 

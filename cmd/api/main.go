@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	appdoc "multi-tenant-hybrid-search/internal/application/document"
 	appt "multi-tenant-hybrid-search/internal/application/tenant"
 	"multi-tenant-hybrid-search/internal/auth"
 	"multi-tenant-hybrid-search/internal/config"
@@ -62,10 +63,11 @@ func run() error {
 		return err
 	}
 	handler := httpapi.NewRouter(httpapi.Deps{
-		Ready: ready,
-		Log:   log,
-		Auth:  middleware.Auth(authn),
-		Me:    appt.NewService(database.NewTenantRepository(pool)),
+		Ready:     ready,
+		Log:       log,
+		Auth:      middleware.Auth(authn),
+		Me:        appt.NewService(database.NewTenantRepository(pool)),
+		Documents: appdoc.NewService(database.NewDocumentRepository(pool)),
 	})
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
