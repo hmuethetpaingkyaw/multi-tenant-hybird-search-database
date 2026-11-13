@@ -8,8 +8,22 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	domain "multi-tenant-hybrid-search/internal/domain/document"
+	"multi-tenant-hybrid-search/internal/domain/embedding"
 	"multi-tenant-hybrid-search/internal/infrastructure/database"
+	infraemb "multi-tenant-hybrid-search/internal/infrastructure/embedding"
 )
+
+func testEmb(in domain.Input) embedding.Embedding {
+	return embedding.Embedding{Model: "fake-bow-768", Content: in.Title, Vector: infraemb.Vectorize(in.Title + " " + in.Content)}
+}
+
+func mkCreate(r *database.DocumentRepository, ctx context.Context, scope string, in domain.Input) (domain.Document, error) {
+	return r.Create(ctx, scope, in, testEmb(in))
+}
+
+func mkUpdate(r *database.DocumentRepository, ctx context.Context, scope, id string, in domain.Input) (domain.Document, error) {
+	return r.Update(ctx, scope, id, in, testEmb(in))
+}
 
 // resetTenants leaves tenants A, B, C with no users or documents.
 func resetTenants(t *testing.T, e *env) {
@@ -26,7 +40,7 @@ func TestDocumentRepositoryCRUDAndIsolation(t *testing.T) {
 	resetTenants(t, e)
 	repo := database.NewDocumentRepository(e.app)
 
-	created, err := repo.Create(ctx, tenA, domain.Input{Title: "T1", Content: "C1"})
+	created, err := mkCreate(repo, ctx, tenA, domain.Input{Title: "T1", Content: "C1"})
 	if err != nil || created.ID == "" || created.Title != "T1" || created.Content != "C1" {
 		t.Fatalf("create: %+v err=%v", created, err)
 	}
@@ -39,7 +53,7 @@ func TestDocumentRepositoryCRUDAndIsolation(t *testing.T) {
 		t.Fatalf("get: %+v err=%v", got, err)
 	}
 
-	updated, err := repo.Update(ctx, tenA, created.ID, domain.Input{Title: "T2", Content: "C2"})
+	updated, err := mkUpdate(repo, ctx, tenA, created.ID, domain.Input{Title: "T2", Content: "C2"})
 	if err != nil || updated.Title != "T2" || updated.Content != "C2" ||
 		!updated.CreatedAt.Equal(created.CreatedAt) || !updated.UpdatedAt.After(created.UpdatedAt) {
 		t.Fatalf("update: %+v (created %+v) err=%v", updated, created, err)
@@ -50,7 +64,7 @@ func TestDocumentRepositoryCRUDAndIsolation(t *testing.T) {
 		if _, err := repo.Get(ctx, other, created.ID); !errors.Is(err, domain.ErrNotFound) {
 			t.Errorf("get as other: %v", err)
 		}
-		if _, err := repo.Update(ctx, other, created.ID, domain.Input{Title: "hacked", Content: "x"}); !errors.Is(err, domain.ErrNotFound) {
+		if _, err := mkUpdate(repo, ctx, other, created.ID, domain.Input{Title: "hacked", Content: "x"}); !errors.Is(err, domain.ErrNotFound) {
 			t.Errorf("update as other: %v", err)
 		}
 		if err := repo.Delete(ctx, other, created.ID); !errors.Is(err, domain.ErrNotFound) {
@@ -92,11 +106,11 @@ func TestDocumentRepositoryList(t *testing.T) {
 	}
 
 	for _, ti := range []string{"first", "second", "third"} {
-		if _, err := repo.Create(ctx, tenA, domain.Input{Title: ti, Content: "c"}); err != nil {
+		if _, err := mkCreate(repo, ctx, tenA, domain.Input{Title: ti, Content: "c"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := repo.Create(ctx, tenB, domain.Input{Title: "B's", Content: "c"}); err != nil {
+	if _, err := mkCreate(repo, ctx, tenB, domain.Input{Title: "B's", Content: "c"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,17 +139,13 @@ func TestDeleteDocumentRemovesEmbeddings(t *testing.T) {
 	resetTenants(t, e)
 	repo := database.NewDocumentRepository(e.app)
 
-	d, err := repo.Create(ctx, tenA, domain.Input{Title: "t", Content: "c"})
+	d, err := mkCreate(repo, ctx, tenA, domain.Input{Title: "t", Content: "c"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = database.WithTenantTx(ctx, e.app, tenA, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO document_embeddings (tenant_id, document_id, content, model, embedding)
-			VALUES ($1, $2, 'c', 'm', `+zeroVec+`)`, tenA, d.ID)
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
+	var before int
+	if err := e.super.QueryRow(ctx, `SELECT count(*) FROM document_embeddings WHERE document_id = $1`, d.ID).Scan(&before); err != nil || before != 1 {
+		t.Fatalf("embedding rows before delete = %d (err %v), want 1", before, err)
 	}
 	if err := repo.Delete(ctx, tenA, d.ID); err != nil {
 		t.Fatal(err)

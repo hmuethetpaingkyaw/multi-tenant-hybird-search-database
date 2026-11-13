@@ -3,14 +3,48 @@ package document
 
 import (
 	"context"
+	"errors"
 
 	domain "multi-tenant-hybrid-search/internal/domain/document"
+	"multi-tenant-hybrid-search/internal/domain/embedding"
 	"multi-tenant-hybrid-search/internal/domain/tenant"
 )
 
-type Service struct{ repo domain.Repository }
+// MaxEmbedChars bounds the text that is embedded: one chunk per document, so only the first
+// MaxEmbedChars characters of title + content influence semantic search. Real chunking comes later.
+const MaxEmbedChars = 8000
 
-func NewService(repo domain.Repository) *Service { return &Service{repo: repo} }
+type Service struct {
+	repo domain.Repository
+	emb  embedding.Embedder
+}
+
+func NewService(repo domain.Repository, emb embedding.Embedder) *Service {
+	return &Service{repo: repo, emb: emb}
+}
+
+// embed builds the chunk and embeds it. It runs before any database transaction, so a slow embedding
+// service never holds a pooled connection. Any failure is reported as embedding.ErrUnavailable.
+func (s *Service) embed(ctx context.Context, in domain.Input) (embedding.Embedding, error) {
+	chunk := buildChunk(in)
+	vec, err := s.emb.EmbedDocument(ctx, chunk)
+	if err != nil {
+		if !errors.Is(err, embedding.ErrUnavailable) {
+			err = embedding.Unavailable(err)
+		}
+		return embedding.Embedding{}, err
+	}
+	return embedding.Embedding{Model: s.emb.Model(), Content: chunk, Vector: vec}, nil
+}
+
+// buildChunk is title + blank line + content, cut to MaxEmbedChars characters.
+func buildChunk(in domain.Input) string {
+	r := []rune(in.Title + "\n\n" + in.Content)
+	if len(r) > MaxEmbedChars {
+		r = r[:MaxEmbedChars]
+	}
+	return string(r)
+}
 
 // ListResult is one page of document summaries with the effective paging values.
 type ListResult struct {
@@ -27,7 +61,11 @@ func (s *Service) Create(ctx context.Context, id tenant.Identity, in domain.Inpu
 	if err != nil {
 		return domain.Document{}, err
 	}
-	return s.repo.Create(ctx, id.TenantID, v)
+	emb, err := s.embed(ctx, v)
+	if err != nil {
+		return domain.Document{}, err
+	}
+	return s.repo.Create(ctx, id.TenantID, v, emb)
 }
 
 func (s *Service) Get(ctx context.Context, id tenant.Identity, docID string) (domain.Document, error) {
@@ -47,14 +85,18 @@ func (s *Service) List(ctx context.Context, id tenant.Identity, limit, offset *i
 	return ListResult{Documents: docs, Limit: l, Offset: o}, nil
 }
 
-// Update replaces title and content.
-// Phase 4: when embeddings exist, a content change must re-embed; nothing to do yet.
+// Update replaces title and content and re-embeds. Embedding happens first, so if the embedding
+// service is down the update fails and the document and its embedding stay unchanged.
 func (s *Service) Update(ctx context.Context, id tenant.Identity, docID string, in domain.Input) (domain.Document, error) {
 	v, err := in.Validate()
 	if err != nil {
 		return domain.Document{}, err
 	}
-	return s.repo.Update(ctx, id.TenantID, docID, v)
+	emb, err := s.embed(ctx, v)
+	if err != nil {
+		return domain.Document{}, err
+	}
+	return s.repo.Update(ctx, id.TenantID, docID, v, emb)
 }
 
 func (s *Service) Delete(ctx context.Context, id tenant.Identity, docID string) error {

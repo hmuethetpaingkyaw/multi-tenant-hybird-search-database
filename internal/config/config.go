@@ -17,6 +17,11 @@ type Config struct {
 	// JWTSecret signs and verifies dev auth tokens (HS256); at least 32 bytes.
 	JWTSecret string
 
+	// Embedding service (Ollama).
+	OllamaURL        string
+	EmbeddingModel   string
+	EmbeddingTimeout time.Duration
+
 	DBMaxConns        int32
 	DBMinConns        int32
 	DBMaxConnLifetime time.Duration
@@ -32,6 +37,9 @@ func load(get func(string) string) (Config, error) {
 		HTTPPort:    str(get, "HTTP_PORT", "8080"),
 		LogLevel:    str(get, "LOG_LEVEL", "info"),
 		JWTSecret:   get("JWT_SECRET"),
+
+		OllamaURL:      str(get, "OLLAMA_URL", "http://localhost:11434"),
+		EmbeddingModel: str(get, "EMBEDDING_MODEL", "nomic-embed-text"),
 	}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("config: DATABASE_URL is required")
@@ -50,6 +58,9 @@ func load(get func(string) string) (Config, error) {
 		return Config{}, errors.New("config: DB_MIN_CONNS must not exceed DB_MAX_CONNS")
 	}
 	if c.DBMaxConnLifetime, err = dur(get, "DB_MAX_CONN_LIFETIME", 30*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if c.EmbeddingTimeout, err = dur(get, "EMBEDDING_TIMEOUT", 30*time.Second); err != nil {
 		return Config{}, err
 	}
 	if c.DBHealthCheck, err = dur(get, "DB_HEALTH_CHECK_PERIOD", time.Minute); err != nil {

@@ -33,6 +33,28 @@ services:
       - up
     restart: "no"
 
+  ollama:
+    # Local embedding model server (CPU-only inside Docker on macOS).
+    image: ollama/ollama:0.40.16
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama-init:
+    # One-shot: downloads the embedding model into the ollama volume (first run only).
+    image: ollama/ollama:0.40.16
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["ollama", "pull", "${EMBEDDING_MODEL:-nomic-embed-text}"]
+    restart: "no"
+
   api:
     build: .
     # Connects as the restricted app role, never the owner or superuser.
@@ -40,11 +62,16 @@ services:
       DATABASE_URL: postgres://search_app:${APP_PASSWORD:-app_dev}@db:5432/search?sslmode=disable
       HTTP_PORT: "8080"
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
+      OLLAMA_URL: http://ollama:11434
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      ollama-init:
         condition: service_completed_successfully
     ports:
       - "${HTTP_PORT:-8080}:8080"
 
 volumes:
   pgdata:
+  ollama_data:

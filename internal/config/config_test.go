@@ -15,7 +15,8 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.HTTPPort != "8080" || c.LogLevel != "info" || c.DBMaxConns != 10 || c.DBMinConns != 1 ||
-		c.DBMaxConnLifetime != 30*time.Minute || c.DBHealthCheck != time.Minute {
+		c.DBMaxConnLifetime != 30*time.Minute || c.DBHealthCheck != time.Minute ||
+		c.OllamaURL != "http://localhost:11434" || c.EmbeddingModel != "nomic-embed-text" || c.EmbeddingTimeout != 30*time.Second {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
 }
@@ -23,12 +24,13 @@ func TestDefaults(t *testing.T) {
 func TestOverrides(t *testing.T) {
 	c, err := load(env(map[string]string{
 		"DATABASE_URL": "postgres://x", "JWT_SECRET": secret, "HTTP_PORT": "9000", "DB_MAX_CONNS": "20",
-		"DB_MAX_CONN_LIFETIME": "5m",
+		"DB_MAX_CONN_LIFETIME": "5m", "OLLAMA_URL": "http://ollama:11434", "EMBEDDING_MODEL": "m", "EMBEDDING_TIMEOUT": "5s",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.HTTPPort != "9000" || c.DBMaxConns != 20 || c.DBMaxConnLifetime != 5*time.Minute {
+	if c.HTTPPort != "9000" || c.DBMaxConns != 20 || c.DBMaxConnLifetime != 5*time.Minute ||
+		c.OllamaURL != "http://ollama:11434" || c.EmbeddingModel != "m" || c.EmbeddingTimeout != 5*time.Second {
 		t.Fatalf("overrides not applied: %+v", c)
 	}
 }

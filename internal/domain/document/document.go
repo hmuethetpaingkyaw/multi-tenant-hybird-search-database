@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"multi-tenant-hybrid-search/internal/domain/embedding"
 )
 
 const (
@@ -101,9 +103,9 @@ func (in Input) Validate() (Input, error) {
 // Repository persists documents. scopeTenantID is the RLS context every call runs under;
 // implementations must not add their own tenant filters.
 type Repository interface {
-	Create(ctx context.Context, scopeTenantID string, in Input) (Document, error)
+	Create(ctx context.Context, scopeTenantID string, in Input, emb embedding.Embedding) (Document, error)
 	Get(ctx context.Context, scopeTenantID, id string) (Document, error)
 	List(ctx context.Context, scopeTenantID string, limit, offset int) ([]Summary, error)
-	Update(ctx context.Context, scopeTenantID, id string, in Input) (Document, error)
+	Update(ctx context.Context, scopeTenantID, id string, in Input, emb embedding.Embedding) (Document, error)
 	Delete(ctx context.Context, scopeTenantID, id string) error
 }
