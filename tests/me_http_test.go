@@ -4,34 +4,27 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"multi-tenant-hybrid-search/api/ollama/mock"
+	"multi-tenant-hybrid-search/domain"
+	"multi-tenant-hybrid-search/tests/testenv"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	appt "multi-tenant-hybrid-search/internal/application/tenant"
-	"multi-tenant-hybrid-search/internal/auth"
-	httpapi "multi-tenant-hybrid-search/internal/delivery/http"
-	"multi-tenant-hybrid-search/internal/delivery/middleware"
-	domain "multi-tenant-hybrid-search/internal/domain/tenant"
-	"multi-tenant-hybrid-search/internal/infrastructure/database"
+	"multi-tenant-hybrid-search/driver/auth"
 )
 
 func TestMeEndpoint(t *testing.T) {
-	e := getEnv(t)
-	seedThreeTenants(t, e)
+	e := testenv.Get(t)
+	testenv.SeedThreeTenants(t, e)
 	authn, err := auth.New("0123456789abcdef0123456789abcdef")
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := httpapi.NewRouter(httpapi.Deps{
-		Ready: func(ctx2 context.Context) error { return nil },
-		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Auth:  middleware.Auth(authn),
-		Me:    appt.NewService(database.NewTenantRepository(e.app)),
-	})
-	userA, userB := userIDOf(t, e, tenA), userIDOf(t, e, tenB)
+	router := testenv.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), e.App, authn, &mock_ollama.Fake{}, func(context.Context) error { return nil })
+	userA, userB := testenv.UserIDOf(t, e, testenv.TenA), testenv.UserIDOf(t, e, testenv.TenB)
 	token := func(user, tenant string) string {
 		tok, err := authn.Issue(domain.Identity{UserID: user, TenantID: tenant}, time.Hour)
 		if err != nil {
@@ -58,16 +51,16 @@ func TestMeEndpoint(t *testing.T) {
 	if w := call("/api/v1/me", "Basic abc"); w.Code != http.StatusUnauthorized {
 		t.Errorf("wrong scheme = %d, want 401", w.Code)
 	}
-	w := call("/api/v1/me", "Bearer "+token(userA, tenA))
+	w := call("/api/v1/me", "Bearer "+token(userA, testenv.TenA))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"tenant-a"`) || !strings.Contains(w.Body.String(), userA) {
 		t.Errorf("valid A token = %d %s", w.Code, w.Body.String())
 	}
-	w = call("/api/v1/me", "Bearer "+token(userB, tenB))
+	w = call("/api/v1/me", "Bearer "+token(userB, testenv.TenB))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"tenant-b"`) {
 		t.Errorf("valid B token = %d %s", w.Code, w.Body.String())
 	}
 	// Token claims tenant B but names tenant A's user: RLS hides the user.
-	if w := call("/api/v1/me", "Bearer "+token(userA, tenB)); w.Code != http.StatusNotFound {
+	if w := call("/api/v1/me", "Bearer "+token(userA, testenv.TenB)); w.Code != http.StatusNotFound {
 		t.Errorf("mismatched token = %d, want 404", w.Code)
 	}
 	// Probes stay unauthenticated.

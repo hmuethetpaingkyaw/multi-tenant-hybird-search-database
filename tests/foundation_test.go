@@ -3,31 +3,23 @@ package tests
 import (
 	"context"
 	"errors"
+	"github.com/golang-migrate/migrate/v4"
+	"multi-tenant-hybrid-search/driver/db"
+	"multi-tenant-hybrid-search/tests/testenv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"multi-tenant-hybrid-search/internal/infrastructure/database"
 )
 
-func mustExec(t *testing.T, p *pgxpool.Pool, sql string, args ...any) {
-	t.Helper()
-	if _, err := p.Exec(context.Background(), sql, args...); err != nil {
-		t.Fatalf("%s: %v", sql, err)
-	}
-}
-
 func TestFoundation(t *testing.T) {
-	e := getEnv(t)
+	e := testenv.Get(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	t.Run("migrations up/down/up", func(t *testing.T) {
-		m := e.migrate()
+		m := e.Migrate()
 		defer m.Close()
 		for _, step := range []struct {
 			name string
@@ -42,7 +34,7 @@ func TestFoundation(t *testing.T) {
 	t.Run("role attributes", func(t *testing.T) {
 		for _, role := range []string{"search_owner", "search_app"} {
 			var super, bypass bool
-			err := e.super.QueryRow(ctx,
+			err := e.Super.QueryRow(ctx,
 				`SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = $1`, role).Scan(&super, &bypass)
 			if err != nil {
 				t.Fatal(err)
@@ -55,14 +47,14 @@ func TestFoundation(t *testing.T) {
 
 	t.Run("app role privileges are limited", func(t *testing.T) {
 		for _, q := range []string{`INSERT INTO tenants (name) VALUES ('t')`, `UPDATE tenants SET name = 'x'`, `DELETE FROM tenants`} {
-			if _, err := e.app.Exec(ctx, q); err == nil {
+			if _, err := e.App.Exec(ctx, q); err == nil {
 				t.Errorf("app role must not run %q (tenants are admin-managed)", q)
 			}
 		}
-		if _, err := e.app.Exec(ctx, `CREATE TABLE evil (i int)`); err == nil {
+		if _, err := e.App.Exec(ctx, `CREATE TABLE evil (i int)`); err == nil {
 			t.Error("app role must not create tables")
 		}
-		if _, err := e.app.Exec(ctx, `DROP TABLE documents`); err == nil {
+		if _, err := e.App.Exec(ctx, `DROP TABLE documents`); err == nil {
 			t.Error("app role must not drop tables")
 		}
 	})
@@ -70,12 +62,12 @@ func TestFoundation(t *testing.T) {
 	t.Run("composite FK rejects cross-tenant embedding", func(t *testing.T) {
 		const a, b, d = "00000000-0000-0000-0000-00000000000a", "00000000-0000-0000-0000-00000000000b",
 			"00000000-0000-0000-0000-0000000000d1"
-		mustExec(t, e.super, `DELETE FROM tenants`)
-		mustExec(t, e.owner, `INSERT INTO tenants (id, name) VALUES ($1,'A'), ($2,'B')`, a, b)
-		defer mustExec(t, e.super, `DELETE FROM tenants`)
+		testenv.MustExec(t, e.Super, `DELETE FROM tenants`)
+		testenv.MustExec(t, e.Owner, `INSERT INTO tenants (id, name) VALUES ($1,'A'), ($2,'B')`, a, b)
+		defer testenv.MustExec(t, e.Super, `DELETE FROM tenants`)
 
 		// Tenant A owns the document. Tenant B (valid RLS context for B) points at it: only the FK can stop this.
-		err := database.WithTenantTx(ctx, e.app, a, func(tx pgx.Tx) error {
+		err := db.WithTenantTx(ctx, e.App, a, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO documents (id, tenant_id, title, content) VALUES ($1,$2,'t','c')`, d, a)
 			return err
 		})
@@ -84,14 +76,14 @@ func TestFoundation(t *testing.T) {
 		}
 		const ins = `INSERT INTO document_embeddings (tenant_id, document_id, content, model, embedding)
 		             VALUES ($1, $2, 'c', 'm', array_fill(0, ARRAY[768])::vector)`
-		err = database.WithTenantTx(ctx, e.app, b, func(tx pgx.Tx) error {
+		err = db.WithTenantTx(ctx, e.App, b, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, ins, b, d)
 			return err
 		})
 		if err == nil || !strings.Contains(err.Error(), "foreign key") {
 			t.Errorf("cross-tenant embedding must violate FK, got: %v", err)
 		}
-		err = database.WithTenantTx(ctx, e.app, a, func(tx pgx.Tx) error {
+		err = db.WithTenantTx(ctx, e.App, a, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, ins, a, d)
 			return err
 		})
@@ -101,14 +93,14 @@ func TestFoundation(t *testing.T) {
 	})
 
 	t.Run("extension check", func(t *testing.T) {
-		if err := database.CheckExtensions(ctx, e.app); err != nil {
+		if err := db.CheckExtensions(ctx, e.App); err != nil {
 			t.Fatalf("extensions should be present: %v", err)
 		}
-		mustExec(t, e.super, `DROP EXTENSION pg_search`)
-		err := database.CheckExtensions(ctx, e.app)
+		testenv.MustExec(t, e.Super, `DROP EXTENSION pg_search`)
+		err := db.CheckExtensions(ctx, e.App)
 		if err == nil || !strings.Contains(err.Error(), "pg_search") {
 			t.Errorf("want error naming pg_search, got: %v", err)
 		}
-		mustExec(t, e.super, `CREATE EXTENSION pg_search`)
+		testenv.MustExec(t, e.Super, `CREATE EXTENSION pg_search`)
 	})
 }

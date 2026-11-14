@@ -7,15 +7,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"multi-tenant-hybrid-search/domain"
+	"multi-tenant-hybrid-search/driver/db"
 	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"multi-tenant-hybrid-search/internal/auth"
-	domain "multi-tenant-hybrid-search/internal/domain/tenant"
-	"multi-tenant-hybrid-search/internal/infrastructure/database"
+	"multi-tenant-hybrid-search/driver/auth"
 )
 
 type seedTenant struct{ Letter, TenantID, UserID string }
@@ -56,7 +56,7 @@ func run() error {
 			t.TenantID, "tenant-"+t.Letter); err != nil {
 			return fmt.Errorf("tenant %s: %w", t.Letter, err)
 		}
-		err := database.WithTenantTx(ctx, pool, t.TenantID, func(tx pgx.Tx) error {
+		err := db.WithTenantTx(ctx, pool, t.TenantID, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx,
 				`INSERT INTO users (id, tenant_id, email) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
 				t.UserID, t.TenantID, "user-"+t.Letter+"@example.com")

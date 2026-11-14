@@ -1,4 +1,4 @@
-.PHONY: up down migrate seed test test-short build
+.PHONY: up down migrate seed test test-short build check-layers
 
 up:        ## build and start db, migrations, and the API
 	docker compose up --build -d
@@ -19,6 +19,9 @@ build:
 
 test:      ## unit + integration tests (integration needs Docker)
 	go test ./...
+
+check-layers: ## fail if a layer imports something it must not, or a project import is aliased
+	./scripts/check_layers.sh
 
 test-short: ## unit tests only
 	go test -short ./...

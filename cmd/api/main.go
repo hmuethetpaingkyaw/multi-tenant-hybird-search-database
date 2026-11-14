@@ -11,15 +11,15 @@ import (
 	"syscall"
 	"time"
 
-	appdoc "multi-tenant-hybrid-search/internal/application/document"
-	appsearch "multi-tenant-hybrid-search/internal/application/search"
-	appt "multi-tenant-hybrid-search/internal/application/tenant"
-	"multi-tenant-hybrid-search/internal/auth"
-	"multi-tenant-hybrid-search/internal/config"
-	httpapi "multi-tenant-hybrid-search/internal/delivery/http"
-	"multi-tenant-hybrid-search/internal/delivery/middleware"
-	"multi-tenant-hybrid-search/internal/infrastructure/database"
-	"multi-tenant-hybrid-search/internal/infrastructure/embedding"
+	"multi-tenant-hybrid-search/api/ollama"
+	"multi-tenant-hybrid-search/config"
+	"multi-tenant-hybrid-search/driver/auth"
+	"multi-tenant-hybrid-search/driver/db"
+	"multi-tenant-hybrid-search/http/controller"
+	"multi-tenant-hybrid-search/http/middleware"
+	"multi-tenant-hybrid-search/http/router"
+	"multi-tenant-hybrid-search/repository"
+	"multi-tenant-hybrid-search/usecase"
 )
 
 func main() {
@@ -45,12 +45,12 @@ func run() error {
 
 	startCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	pool, err := database.NewPool(startCtx, cfg)
+	pool, err := db.NewPool(startCtx, cfg)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	if err := database.CheckExtensions(startCtx, pool); err != nil {
+	if err := db.CheckExtensions(startCtx, pool); err != nil {
 		return err
 	}
 
@@ -58,20 +58,24 @@ func run() error {
 		if err := pool.Ping(ctx); err != nil {
 			return err
 		}
-		return database.CheckExtensions(ctx, pool)
+		return db.CheckExtensions(ctx, pool)
 	}
 	authn, err := auth.New(cfg.JWTSecret)
 	if err != nil {
 		return err
 	}
-	embedder := embedding.NewOllama(cfg.OllamaURL, cfg.EmbeddingModel, cfg.EmbeddingTimeout)
-	handler := httpapi.NewRouter(httpapi.Deps{
-		Ready:     ready,
-		Log:       log,
-		Auth:      middleware.Auth(authn),
-		Me:        appt.NewService(database.NewTenantRepository(pool)),
-		Documents: appdoc.NewService(database.NewDocumentRepository(pool), embedder),
-		Search:    appsearch.NewService(database.NewSearchRepository(pool), embedder),
+
+	// Explicit dependency injection: adapters -> repositories -> usecases -> controllers -> router.
+	embedder := ollama.NewOllama(cfg.OllamaURL, cfg.EmbeddingModel, cfg.EmbeddingTimeout)
+	tenantRepository := repository.NewTenantRepository(pool)
+	documentRepository := repository.NewDocumentRepository(pool)
+	searchRepository := repository.NewSearchRepository(pool)
+
+	handler := router.New(log, middleware.Auth(authn), router.Controllers{
+		Health:   controller.NewHealthController(ready, log),
+		Tenant:   controller.NewTenantController(usecase.NewTenantUsecase(tenantRepository)),
+		Document: controller.NewDocumentController(usecase.NewDocumentUsecase(documentRepository, embedder)),
+		Search:   controller.NewSearchController(usecase.NewSearchUsecase(searchRepository, embedder)),
 	})
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
