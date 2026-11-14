@@ -5,44 +5,36 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"multi-tenant-hybrid-search/api/ollama/mock"
+	"multi-tenant-hybrid-search/domain"
+	"multi-tenant-hybrid-search/tests/testenv"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	appdoc "multi-tenant-hybrid-search/internal/application/document"
-	"multi-tenant-hybrid-search/internal/auth"
-	httpapi "multi-tenant-hybrid-search/internal/delivery/http"
-	"multi-tenant-hybrid-search/internal/delivery/middleware"
-	"multi-tenant-hybrid-search/internal/domain/tenant"
-	"multi-tenant-hybrid-search/internal/infrastructure/database"
-	"multi-tenant-hybrid-search/internal/infrastructure/embedding"
+	"multi-tenant-hybrid-search/driver/auth"
 )
 
 func TestDocumentsHTTPFullStackIsolation(t *testing.T) {
-	e := getEnv(t)
+	e := testenv.Get(t)
 	ctx := context.Background()
-	resetTenants(t, e)
+	testenv.ResetTenants(t, e)
 
 	authn, err := auth.New("0123456789abcdef0123456789abcdef")
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := httpapi.NewRouter(httpapi.Deps{
-		Ready:     func(context.Context) error { return nil },
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Auth:      middleware.Auth(authn),
-		Documents: appdoc.NewService(database.NewDocumentRepository(e.app), &embedding.Fake{}),
-	})
+	router := testenv.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), e.App, authn, &mock_ollama.Fake{}, func(context.Context) error { return nil })
 	token := func(tenantID string) string {
-		tok, err := authn.Issue(tenant.Identity{UserID: "10000000-0000-0000-0000-000000000001", TenantID: tenantID}, time.Hour)
+		tok, err := authn.Issue(domain.Identity{UserID: "10000000-0000-0000-0000-000000000001", TenantID: tenantID}, time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return tok
 	}
-	tokA, tokB := token(tenA), token(tenB)
+	tokA, tokB := token(testenv.TenA), token(testenv.TenB)
 	call := func(method, path, body, tok string) (int, string) {
 		var rd io.Reader
 		if body != "" {
@@ -58,7 +50,7 @@ func TestDocumentsHTTPFullStackIsolation(t *testing.T) {
 	}
 	docCount := func() int {
 		var n int
-		if err := e.super.QueryRow(ctx, `SELECT count(*) FROM documents`).Scan(&n); err != nil {
+		if err := e.Super.QueryRow(ctx, `SELECT count(*) FROM documents`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n
@@ -75,7 +67,7 @@ func TestDocumentsHTTPFullStackIsolation(t *testing.T) {
 		t.Fatalf("create body: %s", body)
 	}
 	var owner string
-	if err := e.super.QueryRow(ctx, `SELECT tenant_id::text FROM documents WHERE id = $1`, created.ID).Scan(&owner); err != nil || owner != tenA {
+	if err := e.Super.QueryRow(ctx, `SELECT tenant_id::text FROM documents WHERE id = $1`, created.ID).Scan(&owner); err != nil || owner != testenv.TenA {
 		t.Fatalf("stored tenant = %q (err %v), want A", owner, err)
 	}
 	if code, body = call("GET", "/api/v1/documents/"+created.ID, "", tokA); code != 200 || !strings.Contains(body, "steps...") {
@@ -109,7 +101,7 @@ func TestDocumentsHTTPFullStackIsolation(t *testing.T) {
 
 	// F8: a body naming tenant_id is rejected and creates nothing.
 	before := docCount()
-	code, body = call("POST", "/api/v1/documents", `{"title":"t","content":"c","tenant_id":"`+tenB+`"}`, tokA)
+	code, body = call("POST", "/api/v1/documents", `{"title":"t","content":"c","tenant_id":"`+testenv.TenB+`"}`, tokA)
 	if code != 400 || !strings.Contains(body, `unknown field`) || docCount() != before {
 		t.Errorf("tenant_id body = %d %s (docs %d -> %d)", code, body, before, docCount())
 	}

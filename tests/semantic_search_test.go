@@ -6,6 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"multi-tenant-hybrid-search/api/ollama/mock"
+	"multi-tenant-hybrid-search/domain"
+	"multi-tenant-hybrid-search/repository"
+	"multi-tenant-hybrid-search/tests/testenv"
+	"multi-tenant-hybrid-search/usecase"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -13,30 +18,23 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	appsearch "multi-tenant-hybrid-search/internal/application/search"
-	"multi-tenant-hybrid-search/internal/auth"
-	httpapi "multi-tenant-hybrid-search/internal/delivery/http"
-	"multi-tenant-hybrid-search/internal/delivery/middleware"
-	docdomain "multi-tenant-hybrid-search/internal/domain/document"
-	"multi-tenant-hybrid-search/internal/domain/search"
-	"multi-tenant-hybrid-search/internal/infrastructure/database"
-	"multi-tenant-hybrid-search/internal/infrastructure/embedding"
+	"multi-tenant-hybrid-search/driver/auth"
 )
 
-func searchSvc(e *env, pool *pgxpool.Pool, f *embedding.Fake) *appsearch.Service {
-	return appsearch.NewService(database.NewSearchRepository(pool), f)
+func searchSvc(e *testenv.Env, pool *pgxpool.Pool, f *mock_ollama.Fake) *usecase.SearchUsecase {
+	return usecase.NewSearchUsecase(repository.NewSearchRepository(pool), f)
 }
 
-func mustCreate(t *testing.T, e *env, f *embedding.Fake, tenantID, title, content string) docdomain.Document {
+func mustCreate(t *testing.T, e *testenv.Env, f *mock_ollama.Fake, tenantID, title, content string) domain.Document {
 	t.Helper()
-	d, err := newDocService(e, f).Create(context.Background(), ident(tenantID), docdomain.Input{Title: title, Content: content})
+	d, err := testenv.NewDocumentUsecase(e, f).Create(context.Background(), testenv.Ident(tenantID), domain.DocumentInput{Title: title, Content: content})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return d
 }
 
-func titles(rs []search.Result) []string {
+func titles(rs []domain.SearchResult) []string {
 	out := make([]string, len(rs))
 	for i, r := range rs {
 		out[i] = r.Title
@@ -45,16 +43,16 @@ func titles(rs []search.Result) []string {
 }
 
 func TestSemanticSearchRelevanceOrderLimitAndEmpty(t *testing.T) {
-	e := getEnv(t)
+	e := testenv.Get(t)
 	ctx := context.Background()
-	resetTenants(t, e)
-	f := &embedding.Fake{}
-	mustCreate(t, e, f, tenA, "Quarterly sales report", "Revenue figures for the European region")
-	mustCreate(t, e, f, tenA, "Account Recovery Guide", "How to recover your account: reset the password using your email")
-	mustCreate(t, e, f, tenA, "Office parking policy", "Where employees may park")
-	svc := searchSvc(e, e.app, f)
+	testenv.ResetTenants(t, e)
+	f := &mock_ollama.Fake{}
+	mustCreate(t, e, f, testenv.TenA, "Quarterly sales report", "Revenue figures for the European region")
+	mustCreate(t, e, f, testenv.TenA, "Account Recovery Guide", "How to recover your account: reset the password using your email")
+	mustCreate(t, e, f, testenv.TenA, "Office parking policy", "Where employees may park")
+	svc := searchSvc(e, e.App, f)
 
-	res, err := svc.Semantic(ctx, ident(tenA), "How can I recover my account?", nil)
+	res, err := svc.Semantic(ctx, testenv.Ident(testenv.TenA), "How can I recover my account?", nil)
 	if err != nil || len(res) != 3 {
 		t.Fatalf("results: %+v err=%v", res, err)
 	}
@@ -71,28 +69,28 @@ func TestSemanticSearchRelevanceOrderLimitAndEmpty(t *testing.T) {
 	}
 
 	one := 1
-	if res, err = svc.Semantic(ctx, ident(tenA), "recover account", &one); err != nil || len(res) != 1 {
+	if res, err = svc.Semantic(ctx, testenv.Ident(testenv.TenA), "recover account", &one); err != nil || len(res) != 1 {
 		t.Errorf("limit 1: %+v err=%v", res, err)
 	}
 
 	// A tenant with no embedded documents: empty, non-nil.
-	res, err = svc.Semantic(ctx, ident(tenC), "recover account", nil)
+	res, err = svc.Semantic(ctx, testenv.Ident(testenv.TenC), "recover account", nil)
 	if err != nil || res == nil || len(res) != 0 {
 		t.Errorf("empty tenant: %v err=%v", res, err)
 	}
 }
 
 func TestSemanticSearchNeverCrossesTenants(t *testing.T) {
-	e := getEnv(t)
+	e := testenv.Get(t)
 	ctx := context.Background()
-	resetTenants(t, e)
-	f := &embedding.Fake{}
+	testenv.ResetTenants(t, e)
+	f := &mock_ollama.Fake{}
 	// A has the perfect match; B only has an unrelated document.
-	aDoc := mustCreate(t, e, f, tenA, "Account Recovery Guide", "recover your account password reset")
-	bDoc := mustCreate(t, e, f, tenB, "Cafeteria menu", "soup salad sandwiches")
-	svc := searchSvc(e, e.app, f)
+	aDoc := mustCreate(t, e, f, testenv.TenA, "Account Recovery Guide", "recover your account password reset")
+	bDoc := mustCreate(t, e, f, testenv.TenB, "Cafeteria menu", "soup salad sandwiches")
+	svc := searchSvc(e, e.App, f)
 
-	resB, err := svc.Semantic(ctx, ident(tenB), "Account Recovery Guide recover your account password reset", nil)
+	resB, err := svc.Semantic(ctx, testenv.Ident(testenv.TenB), "Account Recovery Guide recover your account password reset", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +102,7 @@ func TestSemanticSearchNeverCrossesTenants(t *testing.T) {
 	if len(resB) != 1 || resB[0].DocumentID != bDoc.ID {
 		t.Errorf("B should see only its own document, got %+v", resB)
 	}
-	resA, _ := svc.Semantic(ctx, ident(tenA), "cafeteria soup salad", nil)
+	resA, _ := svc.Semantic(ctx, testenv.Ident(testenv.TenA), "cafeteria soup salad", nil)
 	for _, r := range resA {
 		if r.DocumentID == bDoc.ID {
 			t.Fatalf("tenant A received tenant B's document: %+v", resA)
@@ -113,12 +111,12 @@ func TestSemanticSearchNeverCrossesTenants(t *testing.T) {
 }
 
 func TestSemanticSearchEmbedderFailureSkipsDatabase(t *testing.T) {
-	e := getEnv(t)
-	resetTenants(t, e)
-	f := &embedding.Fake{}
-	svc := searchSvc(e, e.app, f)
+	e := testenv.Get(t)
+	testenv.ResetTenants(t, e)
+	f := &mock_ollama.Fake{}
+	svc := searchSvc(e, e.App, f)
 	f.Err = fmt.Errorf("down")
-	if _, err := svc.Semantic(context.Background(), ident(tenA), "q", nil); err == nil {
+	if _, err := svc.Semantic(context.Background(), testenv.Ident(testenv.TenA), "q", nil); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -131,34 +129,34 @@ func TestSemanticSearchEmbedderFailureSkipsDatabase(t *testing.T) {
 // tenant, RLS filtering after the graph scan can return 0 rows even with hnsw.iterative_scan, because the small
 // tenant's nodes may be unreachable from the graph's entry point (reproduced during development).
 func TestSemanticSearchSmallTenantAmongNearerNoise(t *testing.T) {
-	e := getEnv(t)
+	e := testenv.Get(t)
 	ctx := context.Background()
-	resetTenants(t, e)
-	f := &embedding.Fake{}
+	testenv.ResetTenants(t, e)
+	f := &mock_ollama.Fake{}
 	for i := 1; i <= 5; i++ {
-		mustCreate(t, e, f, tenA, fmt.Sprintf("needle note %d", i), "small tenant document")
+		mustCreate(t, e, f, testenv.TenA, fmt.Sprintf("needle note %d", i), "small tenant document")
 	}
 	query := "needle haystack"
 	// 300 tenant-B embeddings that are distinct but all nearer to the query than any of A's documents.
 	for g := 1; g <= 300; g++ {
 		var docID string
-		if err := e.super.QueryRow(ctx, `INSERT INTO documents (tenant_id, title, content) VALUES ($1, $2, 'c') RETURNING id::text`,
-			tenB, fmt.Sprintf("noise %d", g)).Scan(&docID); err != nil {
+		if err := e.Super.QueryRow(ctx, `INSERT INTO documents (tenant_id, title, content) VALUES ($1, $2, 'c') RETURNING id::text`,
+			testenv.TenB, fmt.Sprintf("noise %d", g)).Scan(&docID); err != nil {
 			t.Fatal(err)
 		}
-		mustExec(t, e.super, `INSERT INTO document_embeddings (tenant_id, document_id, content, model, embedding) VALUES ($1,$2,'noise','m',$3::vector)`,
-			tenB, docID, vecText(embedding.Vectorize(fmt.Sprintf("needle haystack noiseword%d", g))))
+		testenv.MustExec(t, e.Super, `INSERT INTO document_embeddings (tenant_id, document_id, content, model, embedding) VALUES ($1,$2,'noise','m',$3::vector)`,
+			testenv.TenB, docID, testenv.VecText(mock_ollama.Vectorize(fmt.Sprintf("needle haystack noiseword%d", g))))
 	}
-	mustExec(t, e.super, `ANALYZE document_embeddings`)
+	testenv.MustExec(t, e.Super, `ANALYZE document_embeddings`)
 
-	pool, err := pgxpool.New(ctx, e.appURL) // fresh pool: default role settings
+	pool, err := pgxpool.New(ctx, e.AppURL) // fresh pool: default role settings
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
 
 	limit := 5
-	res, err := searchSvc(e, pool, f).Semantic(ctx, ident(tenA), query, &limit)
+	res, err := searchSvc(e, pool, f).Semantic(ctx, testenv.Ident(testenv.TenA), query, &limit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,20 +171,13 @@ func TestSemanticSearchSmallTenantAmongNearerNoise(t *testing.T) {
 }
 
 func TestSemanticSearchOverHTTPFullStack(t *testing.T) {
-	e := getEnv(t)
-	resetTenants(t, e)
-	f := &embedding.Fake{}
+	e := testenv.Get(t)
+	testenv.ResetTenants(t, e)
+	f := &mock_ollama.Fake{}
 	authn, _ := auth.New("0123456789abcdef0123456789abcdef")
-	docs := newDocService(e, f)
-	router := httpapi.NewRouter(httpapi.Deps{
-		Ready:     func(context.Context) error { return nil },
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Auth:      middleware.Auth(authn),
-		Documents: docs,
-		Search:    searchSvc(e, e.app, f),
-	})
+	router := testenv.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), e.App, authn, f, func(context.Context) error { return nil })
 	tokFor := func(tn string) string {
-		tok, _ := authn.Issue(ident(tn), time.Hour)
+		tok, _ := authn.Issue(testenv.Ident(tn), time.Hour)
 		return tok
 	}
 	do := func(path, body, tok string) (int, string) {
@@ -197,14 +188,14 @@ func TestSemanticSearchOverHTTPFullStack(t *testing.T) {
 		return w.Code, w.Body.String()
 	}
 
-	if code, body := do("/api/v1/documents", `{"title":"Account Recovery Guide","content":"how to recover your account"}`, tokFor(tenA)); code != 201 {
+	if code, body := do("/api/v1/documents", `{"title":"Account Recovery Guide","content":"how to recover your account"}`, tokFor(testenv.TenA)); code != 201 {
 		t.Fatalf("create = %d %s", code, body)
 	}
-	if code, _ := do("/api/v1/documents", `{"title":"Parking","content":"where to park"}`, tokFor(tenA)); code != 201 {
+	if code, _ := do("/api/v1/documents", `{"title":"Parking","content":"where to park"}`, tokFor(testenv.TenA)); code != 201 {
 		t.Fatal("create 2")
 	}
 
-	code, body := do("/api/v1/search/semantic", `{"query":"How can I recover my account?"}`, tokFor(tenA))
+	code, body := do("/api/v1/search/semantic", `{"query":"How can I recover my account?"}`, tokFor(testenv.TenA))
 	var out struct {
 		Results []struct{ Title string } `json:"results"`
 		Total   int
@@ -214,7 +205,7 @@ func TestSemanticSearchOverHTTPFullStack(t *testing.T) {
 		t.Errorf("A search = %d %s", code, body)
 	}
 	// The same query as tenant B finds nothing of A's.
-	code, body = do("/api/v1/search/semantic", `{"query":"How can I recover my account?"}`, tokFor(tenB))
+	code, body = do("/api/v1/search/semantic", `{"query":"How can I recover my account?"}`, tokFor(testenv.TenB))
 	if code != 200 || strings.TrimSpace(body) != `{"results":[],"total":0}` {
 		t.Errorf("B search = %d %s", code, body)
 	}

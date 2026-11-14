@@ -25,6 +25,47 @@ is idempotent, and prints fresh tokens each time. Copy a `TOKEN_x=...` line into
 The first `make up` downloads the Ollama image (about 3 GB) and the embedding model into the `ollama_data` volume;
 later runs reuse them. Ollama runs CPU-only inside Docker on macOS, which is fine for an embedding model.
 
+## Project structure
+
+Flat layers at the repo root; the same entity name appears in every layer (`document` -> `domain/document.go`,
+`repository/document_repository.go`, `usecase/document_usecase.go`, `http/controller/document_controller.go`,
+`http/request/document_request.go`, `http/response/document_response.go`). The same holds for `tenant` and `search`.
+
+```
+cmd/api, cmd/seed        entry points; cmd/api wires everything with explicit constructor injection
+config/                  environment configuration
+constants/               limits and fixed user-facing texts
+apperror/                AppError, ValidationError, ErrNotFound, ErrEmbeddingUnavailable
+domain/                  plain entities (no logic, no dependencies except constants)
+repository/              <entity>_repository.go = Port interface + pgx implementation; mock/ = test fakes
+usecase/                 <entity>_usecase.go: the business operations (+ tests)
+http/controller/         one controller per resource: parse -> call usecase -> write the success response
+http/request/            request bodies/queries and their validation (messages are part of the API contract)
+http/response/           response DTOs and converters
+http/middleware/         auth_middleware.go, error_handler.go
+http/router/             route registration
+driver/db, driver/auth   Postgres pool + tenant transaction + extension check; JWT issue/verify
+api/ollama/              Ollama embedding client (EmbedderPort); mock/ = fake embedder for tests
+migrations/ docker/      schema and container setup
+tests/                   integration + API contract tests; tests/testenv = shared test environment
+```
+
+**Layer rules** (enforced by `make check-layers`):
+`domain` imports only `constants`; `repository` imports no `http/*` or `usecase`; `usecase` imports no `http/*`
+(controllers convert requests into domain types first); `http/controller` imports no `repository` or `driver/db`;
+`http/request|response` import no `usecase`, `repository`, `driver` or `api`; `driver/*` and `api/*` import no `usecase`,
+`http` or `repository`. Project packages are imported without aliases.
+
+**Errors:** controllers and middleware only call `c.Error(err)`. `http/middleware/error_handler.go` is the single
+place that maps `AppError`, `ValidationError`, `ErrNotFound`, `ErrEmbeddingUnavailable` and unknown errors to a
+status and `{"error": "..."}` body; 5xx are logged at ERROR (method, path, cause), 4xx are not.
+
+**Add a feature** (one file per layer, named after the entity): `domain/<entity>.go`, a Port in
+`repository/<entity>_repository.go` (every query inside `db.WithTenantTx`, no `WHERE tenant_id`), `usecase/<entity>_usecase.go`,
+`http/request/<entity>_request.go` (validation), `http/response/<entity>_response.go`, `http/controller/<entity>_controller.go`,
+register its routes in `http/router/router.go`, wire it in `cmd/api/main.go`, add unit tests next to each file and a case to
+`tests/api_contract_test.go`. Finish with `make check-layers && go test ./...`.
+
 ## Pinned versions
 
 | Component | Version | Note |
@@ -33,7 +74,7 @@ later runs reuse them. Ollama runs CPU-only inside Docker on macOS, which is fin
 | golang-migrate image | `migrate/migrate:v4.18.3` | |
 | Ollama image | `ollama/ollama:0.40.16` | serves `nomic-embed-text` (768 dimensions, fixed by the schema) |
 
-The image tag is duplicated in `docker-compose.yml` and `tests/helpers_test.go`; change both together.
+The image tag is duplicated in `docker-compose.yml` and `tests/testenv/env.go`; change both together.
 
 ## Role model
 
@@ -52,7 +93,7 @@ Isolation is enforced by PostgreSQL, not by application filters.
 
 1. **Identity.** Clients send a dev JWT (HS256, claims `sub` = user id, `tenant_id`, `exp`), verified with
    `JWT_SECRET`. The tenant is taken only from the verified token, never from the request body, query or headers.
-2. **Tenant context.** All tenant-scoped queries go through `database.WithTenantTx`, which opens a transaction and
+2. **Tenant context.** All tenant-scoped queries go through `db.WithTenantTx` (`driver/db`), which opens a transaction and
    runs `set_config('app.tenant_id', <uuid>, true)`. The `true` makes it transaction-local, so it vanishes at
    commit/rollback and cannot leak to the next user of a pooled connection (covered by tests).
 3. **Policies** (migration `000004_rls`). `app_current_tenant()` reads the setting; policies compare `tenant_id`
